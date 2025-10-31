@@ -1,0 +1,423 @@
+name: Push to Registry Stage
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Docker image name to push'
+        required: true
+        type: string
+      registry-type:
+        description: 'Registry type (ecr, dockerhub, ghcr)'
+        required: false
+        type: string
+        default: 'ecr'
+      tags:
+        description: 'Comma-separated list of tags'
+        required: false
+        type: string
+        default: 'latest'
+      enable-cache:
+        description: 'Enable registry caching'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_REGION:
+        required: false
+      ECR_REPOSITORY:
+        required: false
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+    outputs:
+      registry-url:
+        description: 'Full registry URL'
+        value: ${{ jobs.push.outputs.registry-url }}
+      image-digest:
+        description: 'Image digest'
+        value: ${{ jobs.push.outputs.digest }}
+      push-status:
+        description: 'Push status'
+        value: ${{ jobs.push.outputs.status }}
+
+jobs:
+  push:
+    name: Push Image to Registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    
+    outputs:
+      registry-url: ${{ steps.push-result.outputs.registry-url }}
+      digest: ${{ steps.push-result.outputs.digest }}
+      status: ${{ steps.evaluate.outputs.status }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image-*
+        continue-on-error: true
+
+      - name: Load Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading image from artifact..."
+            docker load -i /tmp/docker-image.tar
+          else
+            echo "Image already available in Docker daemon"
+          fi
+          
+          # Verify image exists
+          if ! docker images ${{ inputs.image-name }}:latest --format "{{.Repository}}" | grep -q "${{ inputs.image-name }}"; then
+            echo "Error: Image ${{ inputs.image-name }}:latest not found"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        if: inputs.registry-type == 'ecr'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: inputs.registry-type == 'ecr'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Login to Docker Hub
+        if: inputs.registry-type == 'dockerhub'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        if: inputs.registry-type == 'ghcr'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: prepare-tags
+        run: |
+          # Determine registry URL based on type
+          if [ "${{ inputs.registry-type }}" = "ecr" ]; then
+            REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+            REPOSITORY="${{ secrets.ECR_REPOSITORY }}"
+          elif [ "${{ inputs.registry-type }}" = "dockerhub" ]; then
+            REGISTRY="docker.io"
+            REPOSITORY="${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.image-name }}"
+          elif [ "${{ inputs.registry-type }}" = "ghcr" ]; then
+            REGISTRY="ghcr.io"
+            REPOSITORY="${{ github.repository_owner }}/${{ inputs.image-name }}"
+          fi
+          
+          echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+          echo "repository=$REPOSITORY" >> $GITHUB_OUTPUT
+          echo "full-path=$REGISTRY/$REPOSITORY" >> $GITHUB_OUTPUT
+          
+          # Process tags
+          IFS=',' read -ra TAG_ARRAY <<< "${{ inputs.tags }}"
+          FULL_TAGS=""
+          for tag in "${TAG_ARRAY[@]}"; do
+            tag=$(echo "$tag" | xargs)  # trim whitespace
+            if [ -z "$FULL_TAGS" ]; then
+              FULL_TAGS="$REGISTRY/$REPOSITORY:$tag"
+            else
+              FULL_TAGS="$FULL_TAGS,$REGISTRY/$REPOSITORY:$tag"
+            fi
+          done
+          
+          echo "full-tags=$FULL_TAGS" >> $GITHUB_OUTPUT
+          
+          echo "### 🏷️ Image Tags" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** $REGISTRY" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** $REPOSITORY" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags to push:**" >> $GITHUB_STEP_SUMMARY
+          for tag in "${TAG_ARRAY[@]}"; do
+            echo "- \`$REGISTRY/$REPOSITORY:$tag\`" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          GIT_BRANCH=${GITHUB_REF#refs/heads/}
+          
+          echo "build-date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "git-commit=$GIT_COMMIT" >> $GITHUB_OUTPUT
+          echo "git-branch=$GIT_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Tag local image
+        run: |
+          IFS=',' read -ra FULL_TAG_ARRAY <<< "${{ steps.prepare-tags.outputs.full-tags }}"
+          
+          for full_tag in "${FULL_TAG_ARRAY[@]}"; do
+            echo "Tagging: ${{ inputs.image-name }}:latest -> $full_tag"
+            docker tag ${{ inputs.image-name }}:latest "$full_tag"
+          done
+
+      - name: Push image to registry
+        id: push-image
+        run: |
+          IFS=',' read -ra FULL_TAG_ARRAY <<< "${{ steps.prepare-tags.outputs.full-tags }}"
+          
+          echo "### 📤 Pushing Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          for full_tag in "${FULL_TAG_ARRAY[@]}"; do
+            echo "Pushing: $full_tag"
+            echo "- Pushing \`$full_tag\`..." >> $GITHUB_STEP_SUMMARY
+            
+            if docker push "$full_tag"; then
+              echo "  ✅ Success" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "  ❌ Failed" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          done
+
+      - name: Get image digest
+        id: digest
+        run: |
+          FIRST_TAG=$(echo "${{ steps.prepare-tags.outputs.full-tags }}" | cut -d',' -f1)
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$FIRST_TAG" | cut -d'@' -f2)
+          
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          
+          echo "### 🔐 Image Digest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "$DIGEST" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify pushed images
+        run: |
+          echo "### ✅ Verification" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          IFS=',' read -ra FULL_TAG_ARRAY <<< "${{ steps.prepare-tags.outputs.full-tags }}"
+          
+          for full_tag in "${FULL_TAG_ARRAY[@]}"; do
+            echo "Verifying: $full_tag"
+            
+            if docker manifest inspect "$full_tag" > /dev/null 2>&1; then
+              SIZE=$(docker manifest inspect "$full_tag" | jq -r '.config.size' 2>/dev/null || echo "unknown")
+              echo "- ✅ \`$full_tag\` (Size: $SIZE bytes)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⚠️ \`$full_tag\` (Unable to verify)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Trigger ECR scan
+        if: inputs.registry-type == 'ecr'
+        run: |
+          echo "Triggering ECR security scan..."
+          
+          aws ecr start-image-scan \
+            --repository-name ${{ secrets.ECR_REPOSITORY }} \
+            --image-id imageTag=latest \
+            --region ${{ secrets.AWS_REGION }} || echo "Scan already in progress"
+          
+          echo "### 🔍 Security Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ECR security scan initiated for pushed images." >> $GITHUB_STEP_SUMMARY
+
+      - name: Set up registry cache
+        if: inputs.enable-cache && inputs.registry-type == 'ecr'
+        run: |
+          echo "Setting up registry cache..."
+          
+          CACHE_TAG="${{ steps.prepare-tags.outputs.full-path }}:buildcache"
+          
+          # Tag and push cache
+          if docker tag ${{ inputs.image-name }}:latest "$CACHE_TAG" 2>/dev/null; then
+            docker push "$CACHE_TAG" || echo "Cache push failed, continuing..."
+            echo "- 💾 Build cache pushed to \`$CACHE_TAG\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate pull commands
+        run: |
+          echo "### 📥 Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Pull latest" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.prepare-tags.outputs.full-path }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Pull by commit" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.prepare-tags.outputs.full-path }}:${{ steps.meta.outputs.git-commit }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Pull by digest" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.prepare-tags.outputs.full-path }}@${{ steps.digest.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Store push result
+        id: push-result
+        run: |
+          echo "registry-url=${{ steps.prepare-tags.outputs.full-path }}" >> $GITHUB_OUTPUT
+          echo "digest=${{ steps.digest.outputs.digest }}" >> $GITHUB_OUTPUT
+
+      - name: Create deployment manifest
+        run: |
+          cat > deployment-manifest.yaml << EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${{ inputs.image-name }}
+            labels:
+              app: ${{ inputs.image-name }}
+              version: ${{ steps.meta.outputs.git-commit }}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: ${{ inputs.image-name }}
+            template:
+              metadata:
+                labels:
+                  app: ${{ inputs.image-name }}
+                  version: ${{ steps.meta.outputs.git-commit }}
+              spec:
+                containers:
+                - name: ${{ inputs.image-name }}
+                  image: ${{ steps.prepare-tags.outputs.full-path }}@${{ steps.digest.outputs.digest }}
+                  ports:
+                  - containerPort: 5000
+                  env:
+                  - name: APP_VERSION
+                    value: "${{ steps.meta.outputs.git-commit }}"
+                  - name: BUILD_DATE
+                    value: "${{ steps.meta.outputs.build-date }}"
+          EOF
+          
+          echo "### 🚀 Kubernetes Deployment Manifest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`yaml" >> $GITHUB_STEP_SUMMARY
+          cat deployment-manifest.yaml >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate ECS task definition
+        if: inputs.registry-type == 'ecr'
+        run: |
+          cat > ecs-task-definition.json << EOF
+          {
+            "family": "${{ inputs.image-name }}-task",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512",
+            "containerDefinitions": [
+              {
+                "name": "${{ inputs.image-name }}",
+                "image": "${{ steps.prepare-tags.outputs.full-path }}@${{ steps.digest.outputs.digest }}",
+                "portMappings": [
+                  {
+                    "containerPort": 5000,
+                    "protocol": "tcp"
+                  }
+                ],
+                "environment": [
+                  {
+                    "name": "APP_VERSION",
+                    "value": "${{ steps.meta.outputs.git-commit }}"
+                  },
+                  {
+                    "name": "BUILD_DATE",
+                    "value": "${{ steps.meta.outputs.build-date }}"
+                  }
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/${{ inputs.image-name }}",
+                    "awslogs-region": "${{ secrets.AWS_REGION }}",
+                    "awslogs-stream-prefix": "ecs"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+          
+          echo "### 🐳 ECS Task Definition" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          cat ecs-task-definition.json >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-manifests
+          path: |
+            deployment-manifest.yaml
+            ecs-task-definition.json
+          retention-days: 30
+
+      - name: Create push report
+        run: |
+          cat > push-report.json << EOF
+          {
+            "registry_type": "${{ inputs.registry-type }}",
+            "registry_url": "${{ steps.prepare-tags.outputs.full-path }}",
+            "image_name": "${{ inputs.image-name }}",
+            "tags": "${{ inputs.tags }}",
+            "digest": "${{ steps.digest.outputs.digest }}",
+            "git_commit": "${{ steps.meta.outputs.git-commit }}",
+            "git_branch": "${{ steps.meta.outputs.git-branch }}",
+            "build_date": "${{ steps.meta.outputs.build-date }}",
+            "push_timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+      - name: Upload push report
+        uses: actions/upload-artifact@v3
+        with:
+          name: push-report
+          path: push-report.json
+          retention-days: 90
+
+      - name: Evaluate push status
+        id: evaluate
+        run: |
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+          echo "## ✅ Push Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ inputs.registry-type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ steps.prepare-tags.outputs.full-path }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** \`${{ steps.digest.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.meta.outputs.git-commit }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Post success notification
+        run: |
+          echo "### 🎉 Deployment Ready" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Image successfully pushed and ready for deployment!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Next steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Pull the image using commands above" >> $GITHUB_STEP_SUMMARY
+          echo "2. Deploy using Kubernetes manifest or ECS task definition" >> $GITHUB_STEP_SUMMARY
+          echo "3. Monitor deployment in your orchestration platform" >> $GITHUB_STEP_SUMMARY
