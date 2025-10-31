@@ -1,0 +1,237 @@
+name: Build Optimized Stage
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        description: 'Path to Dockerfile'
+        required: false
+        type: string
+        default: './app/Dockerfile.multi-stage'
+      image-name:
+        description: 'Docker image name'
+        required: false
+        type: string
+        default: 'multi-stage-app'
+      context:
+        description: 'Build context path'
+        required: false
+        type: string
+        default: './app'
+    outputs:
+      image-tag:
+        description: 'Built image tag'
+        value: ${{ jobs.build.outputs.image-tag }}
+      image-size:
+        description: 'Final image size'
+        value: ${{ jobs.build.outputs.image-size }}
+      build-time:
+        description: 'Build duration in seconds'
+        value: ${{ jobs.build.outputs.build-time }}
+
+jobs:
+  build:
+    name: Optimized Multi-Stage Build
+    runs-on: ubuntu-latest
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-size: ${{ steps.analyze.outputs.size }}
+      build-time: ${{ steps.analyze.outputs.duration }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: 'linux/amd64,linux/arm64'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+          buildkitd-flags: --debug
+
+      - name: Configure Docker layer caching
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('app/requirements.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ hashFiles('app/requirements.txt') }}-
+            ${{ runner.os }}-buildx-
+
+      - name: Extract metadata and tags
+        id: meta
+        run: |
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          GIT_BRANCH=${GITHUB_REF#refs/heads/}
+          VERSION="1.0.0"
+          
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT=$GIT_COMMIT" >> $GITHUB_OUTPUT
+          echo "GIT_BRANCH=$GIT_BRANCH" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Generate tags
+          TAGS="${{ inputs.image-name }}:latest"
+          TAGS="$TAGS,${{ inputs.image-name }}:$GIT_COMMIT"
+          TAGS="$TAGS,${{ inputs.image-name }}:$VERSION"
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          
+          echo "### Build Metadata" >> $GITHUB_STEP_SUMMARY
+          echo "- **Date:** $BUILD_DATE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** $GIT_COMMIT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** $GIT_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
+
+      - name: Start build timer
+        id: timer
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Build multi-stage Docker image
+        id: docker-build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
+            GIT_COMMIT=${{ steps.meta.outputs.GIT_COMMIT }}
+            GIT_BRANCH=${{ steps.meta.outputs.GIT_BRANCH }}
+            APP_VERSION=${{ steps.meta.outputs.VERSION }}
+          labels: |
+            org.opencontainers.image.created=${{ steps.meta.outputs.BUILD_DATE }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.GIT_COMMIT }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.VERSION }}
+
+      - name: Move Docker cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Analyze build results
+        id: analyze
+        run: |
+          # Calculate build duration
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - ${{ steps.timer.outputs.START_TIME }}))
+          echo "duration=${DURATION}" >> $GITHUB_OUTPUT
+          
+          # Get image size
+          SIZE=$(docker images ${{ inputs.image-name }}:latest --format "{{.Size}}")
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          
+          # Get layer count
+          LAYERS=$(docker history ${{ inputs.image-name }}:latest --no-trunc | wc -l)
+          echo "layers=$LAYERS" >> $GITHUB_OUTPUT
+          
+          # Get image ID
+          IMAGE_ID=$(docker images ${{ inputs.image-name }}:latest --format "{{.ID}}")
+          echo "image-id=$IMAGE_ID" >> $GITHUB_OUTPUT
+          
+          echo "### Build Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duration:** ${DURATION}s" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size:** $SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Layers:** $LAYERS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image ID:** $IMAGE_ID" >> $GITHUB_STEP_SUMMARY
+
+      - name: Inspect image layers
+        run: |
+          echo "### Layer Breakdown" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          docker history ${{ inputs.image-name }}:latest --human=true --format "table {{.CreatedBy}}\t{{.Size}}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Verify image architecture
+        run: |
+          ARCH=$(docker inspect ${{ inputs.image-name }}:latest --format='{{.Architecture}}')
+          OS=$(docker inspect ${{ inputs.image-name }}:latest --format='{{.Os}}')
+          
+          echo "### Platform Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture:** $ARCH" >> $GITHUB_STEP_SUMMARY
+          echo "- **OS:** $OS" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check for optimization opportunities
+        run: |
+          # Check for large layers
+          echo "### Optimization Analysis" >> $GITHUB_STEP_SUMMARY
+          
+          LARGE_LAYERS=$(docker history ${{ inputs.image-name }}:latest --no-trunc --format "{{.Size}}" | grep -E '[0-9]{3}MB|[0-9]GB' | wc -l)
+          
+          if [ $LARGE_LAYERS -gt 2 ]; then
+            echo "⚠️ **Warning:** Found $LARGE_LAYERS layers over 100MB" >> $GITHUB_STEP_SUMMARY
+            echo "Consider optimizing large layers" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Good:** Image is well optimized" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check total size
+          SIZE_MB=$(docker images ${{ inputs.image-name }}:latest --format "{{.Size}}" | sed 's/MB//' | sed 's/GB/*1024/' | bc 2>/dev/null || echo "0")
+          
+          if (( $(echo "$SIZE_MB > 500" | bc -l 2>/dev/null || echo 0) )); then
+            echo "⚠️ **Warning:** Image size is large (>500MB)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Good:** Image size is reasonable (<500MB)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Export image for testing
+        run: |
+          docker save ${{ inputs.image-name }}:latest -o /tmp/docker-image.tar
+          
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-image-${{ steps.meta.outputs.GIT_COMMIT }}
+          path: /tmp/docker-image.tar
+          retention-days: 7
+
+      - name: Generate build report
+        run: |
+          cat > build-report.json << EOF
+          {
+            "image": "${{ inputs.image-name }}",
+            "tags": "${{ steps.meta.outputs.tags }}",
+            "size": "${{ steps.analyze.outputs.size }}",
+            "layers": ${{ steps.analyze.outputs.layers }},
+            "duration": ${{ steps.analyze.outputs.duration }},
+            "commit": "${{ steps.meta.outputs.GIT_COMMIT }}",
+            "branch": "${{ steps.meta.outputs.GIT_BRANCH }}",
+            "build_date": "${{ steps.meta.outputs.BUILD_DATE }}",
+            "image_id": "${{ steps.analyze.outputs.image-id }}"
+          }
+          EOF
+          
+          cat build-report.json
+
+      - name: Upload build report
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-report-${{ steps.meta.outputs.GIT_COMMIT }}
+          path: build-report.json
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Image built successfully in ${{ steps.analyze.outputs.duration }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quick Stats" >> $GITHUB_STEP_SUMMARY
+          echo "- 🏷️ **Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 📦 **Size:** ${{ steps.analyze.outputs.size }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 🧱 **Layers:** ${{ steps.analyze.outputs.layers }}" >> $GITHUB_STEP_SUMMARY
+          echo "- ⏱️ **Duration:** ${{ steps.analyze.outputs.duration }}s" >> $GITHUB_STEP_SUMMARY
