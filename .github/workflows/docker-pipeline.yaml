@@ -1,0 +1,323 @@
+name: Multi-Stage Docker Build Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  DOCKER_BUILDKIT: 1
+  BUILDKIT_INLINE_CACHE: 1
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+jobs:
+  build-and-analyze:
+    name: Build Multi-Stage Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    
+    outputs:
+      multi-size: ${{ steps.size-analysis.outputs.MULTI_SIZE }}
+      single-size: ${{ steps.size-analysis.outputs.SINGLE_SIZE }}
+      git-commit: ${{ steps.meta.outputs.GIT_COMMIT }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "VERSION=1.0.0" >> $GITHUB_OUTPUT
+
+      - name: Build multi-stage image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile.multi-stage
+          push: false
+          load: true
+          tags: |
+            multi-stage-app:latest
+            multi-stage-app:${{ steps.meta.outputs.GIT_COMMIT }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
+            GIT_COMMIT=${{ steps.meta.outputs.GIT_COMMIT }}
+            APP_VERSION=${{ steps.meta.outputs.VERSION }}
+
+      - name: Build single-stage image (comparison)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile.single-stage
+          push: false
+          load: true
+          tags: single-stage-app:latest
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Analyze image sizes
+        id: size-analysis
+        run: |
+          MULTI_SIZE=$(docker images multi-stage-app:latest --format "{{.Size}}")
+          SINGLE_SIZE=$(docker images single-stage-app:latest --format "{{.Size}}")
+          
+          echo "### Image Size Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Type | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Multi-Stage | $MULTI_SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Single-Stage | $SINGLE_SIZE |" >> $GITHUB_STEP_SUMMARY
+          
+          echo "MULTI_SIZE=$MULTI_SIZE" >> $GITHUB_OUTPUT
+          echo "SINGLE_SIZE=$SINGLE_SIZE" >> $GITHUB_OUTPUT
+
+      - name: Run security scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: multi-stage-app:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Generate vulnerability report
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image \
+            --format json \
+            --output trivy-report.json \
+            multi-stage-app:latest
+
+      - name: Test image functionality
+        run: |
+          # Start container
+          docker run -d -p 5000:5000 --name test-app multi-stage-app:latest
+          sleep 10
+          
+          # Test health endpoint
+          echo "Testing /health endpoint..."
+          curl -f http://localhost:5000/health || exit 1
+          
+          # Test info endpoint
+          echo "Testing /info endpoint..."
+          curl -f http://localhost:5000/info || exit 1
+          
+          # Test metrics endpoint
+          echo "Testing /metrics endpoint..."
+          curl -f http://localhost:5000/metrics || exit 1
+          
+          # Test home endpoint
+          echo "Testing / endpoint..."
+          curl -f http://localhost:5000 || exit 1
+          
+          echo "All endpoint tests passed!"
+          
+          # Stop and remove container
+          docker stop test-app
+          docker rm test-app
+
+      - name: Inspect image layers
+        run: |
+          echo "### Multi-Stage Image Layers" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          docker history multi-stage-app:latest --no-trunc >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate build report
+        run: |
+          cat > build-report.md << EOF
+          # Docker Build Report
+          
+          ## Build Information
+          - **Build Date:** ${{ steps.meta.outputs.BUILD_DATE }}
+          - **Git Commit:** ${{ steps.meta.outputs.GIT_COMMIT }}
+          - **Version:** ${{ steps.meta.outputs.VERSION }}
+          - **Branch:** ${{ github.ref_name }}
+          
+          ## Image Sizes
+          - **Multi-Stage:** ${{ steps.size-analysis.outputs.MULTI_SIZE }}
+          - **Single-Stage:** ${{ steps.size-analysis.outputs.SINGLE_SIZE }}
+          
+          ## Security Scan
+          Security scan completed. Check artifacts for detailed report.
+          
+          ## Tests
+          All functional tests passed successfully.
+          EOF
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-reports
+          path: |
+            build-report.md
+            trivy-results.sarif
+            trivy-report.json
+          retention-days: 30
+
+  push-to-ecr:
+    name: Push to AWS ECR
+    runs-on: ubuntu-latest
+    needs: build-and-analyze
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "VERSION=1.0.0" >> $GITHUB_OUTPUT
+
+      - name: Build and push to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile.multi-stage
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ steps.meta.outputs.GIT_COMMIT }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:${{ steps.meta.outputs.VERSION }}
+          build-args: |
+            BUILD_DATE=${{ steps.meta.outputs.BUILD_DATE }}
+            GIT_COMMIT=${{ steps.meta.outputs.GIT_COMMIT }}
+            APP_VERSION=${{ steps.meta.outputs.VERSION }}
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:buildcache,mode=max
+
+      - name: Log image details
+        run: |
+          echo "Image pushed successfully!"
+          echo "Repository: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}"
+          echo "Tags: latest, ${{ steps.meta.outputs.GIT_COMMIT }}, ${{ steps.meta.outputs.VERSION }}"
+
+      - name: Scan image in ECR
+        run: |
+          aws ecr start-image-scan \
+            --repository-name ${{ secrets.ECR_REPOSITORY }} \
+            --image-id imageTag=latest \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Deployment Summary
+          
+          ### Image Details
+          - **Registry:** ${{ steps.login-ecr.outputs.registry }}
+          - **Repository:** ${{ secrets.ECR_REPOSITORY }}
+          - **Tags:** latest, ${{ steps.meta.outputs.GIT_COMMIT }}, ${{ steps.meta.outputs.VERSION }}
+          - **Size:** ${{ needs.build-and-analyze.outputs.multi-size }}
+          
+          ### Pull Command
+          \`\`\`bash
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
+          \`\`\`
+          
+          ### Deployment
+          Image is ready for deployment to ECS/EKS
+          EOF
+
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [build-and-analyze, push-to-ecr]
+    if: always()
+    
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ needs.build-and-analyze.result }}" == "success" ]]; then
+            echo "BUILD_STATUS=✅ Success" >> $GITHUB_OUTPUT
+          else
+            echo "BUILD_STATUS=❌ Failed" >> $GITHUB_OUTPUT
+          fi
+          
+          if [[ "${{ needs.push-to-ecr.result }}" == "success" ]]; then
+            echo "DEPLOY_STATUS=✅ Deployed" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.push-to-ecr.result }}" == "skipped" ]]; then
+            echo "DEPLOY_STATUS=⏭️ Skipped" >> $GITHUB_OUTPUT
+          else
+            echo "DEPLOY_STATUS=❌ Failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create notification summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Pipeline Summary
+          
+          ### Status
+          - **Build:** ${{ steps.status.outputs.BUILD_STATUS }}
+          - **Deploy:** ${{ steps.status.outputs.DEPLOY_STATUS }}
+          
+          ### Details
+          - **Branch:** ${{ github.ref_name }}
+          - **Commit:** ${{ github.sha }}
+          - **Actor:** ${{ github.actor }}
+          - **Workflow:** ${{ github.workflow }}
+          
+          ### Image Comparison
+          - **Multi-Stage Size:** ${{ needs.build-and-analyze.outputs.multi-size }}
+          - **Single-Stage Size:** ${{ needs.build-and-analyze.outputs.single-size }}
+          EOF
