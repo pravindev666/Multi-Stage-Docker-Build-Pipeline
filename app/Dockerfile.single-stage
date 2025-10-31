@@ -1,0 +1,42 @@
+# Single-Stage Dockerfile - For comparison purposes
+# This traditional approach results in a much larger image (~1.2GB)
+# Includes all build tools, compilers, and unnecessary dependencies
+
+FROM python:3.11
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+# Note: Many of these are unnecessary for runtime but get included anyway
+RUN apt-get update && \
+    apt-get install -y \
+    gcc \
+    python3-dev \
+    curl \
+    vim \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app.py .
+
+# Expose port
+EXPOSE 5000
+
+# Run application
+# Running as root user (security risk)
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]
+
+# Problems with this approach:
+# 1. Large image size (1.2GB vs 145MB)
+# 2. Running as root user
+# 3. Includes unnecessary build tools
+# 4. More attack surface for vulnerabilities
+# 5. Slower to pull and deploy
+# 6. Higher storage costs
