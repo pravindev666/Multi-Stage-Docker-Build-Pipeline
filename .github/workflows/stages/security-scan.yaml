@@ -1,0 +1,304 @@
+name: Security Scan Stage
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Docker image name to scan'
+        required: true
+        type: string
+      severity:
+        description: 'Vulnerability severity levels to check'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH,MEDIUM'
+      fail-on-critical:
+        description: 'Fail pipeline on critical vulnerabilities'
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      scan-result:
+        description: 'Scan result status'
+        value: ${{ jobs.security-scan.outputs.result }}
+      critical-count:
+        description: 'Number of critical vulnerabilities'
+        value: ${{ jobs.security-scan.outputs.critical }}
+      high-count:
+        description: 'Number of high vulnerabilities'
+        value: ${{ jobs.security-scan.outputs.high }}
+
+jobs:
+  security-scan:
+    name: Security Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    
+    outputs:
+      result: ${{ steps.evaluate.outputs.result }}
+      critical: ${{ steps.parse-results.outputs.critical }}
+      high: ${{ steps.parse-results.outputs.high }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image-*
+        continue-on-error: true
+
+      - name: Load Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            docker load -i /tmp/docker-image.tar
+          else
+            echo "Image already available in Docker daemon"
+          fi
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-name }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: ${{ inputs.severity }}
+          exit-code: '0'
+
+      - name: Run Trivy JSON scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-name }}:latest
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: ${{ inputs.severity }}
+
+      - name: Run Trivy table scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-name }}:latest
+          format: 'table'
+          output: 'trivy-results.txt'
+          severity: ${{ inputs.severity }}
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'container-security'
+
+      - name: Parse scan results
+        id: parse-results
+        run: |
+          # Parse JSON results for vulnerability counts
+          if [ -f trivy-results.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+            MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results.json)
+            LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW")] | length' trivy-results.json)
+            
+            echo "critical=${CRITICAL:-0}" >> $GITHUB_OUTPUT
+            echo "high=${HIGH:-0}" >> $GITHUB_OUTPUT
+            echo "medium=${MEDIUM:-0}" >> $GITHUB_OUTPUT
+            echo "low=${LOW:-0}" >> $GITHUB_OUTPUT
+            
+            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+            echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          else
+            echo "critical=0" >> $GITHUB_OUTPUT
+            echo "high=0" >> $GITHUB_OUTPUT
+            echo "medium=0" >> $GITHUB_OUTPUT
+            echo "low=0" >> $GITHUB_OUTPUT
+            echo "total=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate vulnerability summary
+        run: |
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Vulnerability Count by Severity" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Critical | ${{ steps.parse-results.outputs.critical }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 High | ${{ steps.parse-results.outputs.high }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟡 Medium | ${{ steps.parse-results.outputs.medium }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Low | ${{ steps.parse-results.outputs.low }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | **${{ steps.parse-results.outputs.total }}** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Display scan results table
+        if: always()
+        run: |
+          if [ -f trivy-results.txt ]; then
+            echo "### Detailed Scan Results" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat trivy-results.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Extract top vulnerabilities
+        run: |
+          if [ -f trivy-results.json ]; then
+            echo "### Top Critical Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            CRITICAL_VULNS=$(jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- **\(.VulnerabilityID)**: \(.Title // .Description) (Package: \(.PkgName))"' trivy-results.json | head -10)
+            
+            if [ -n "$CRITICAL_VULNS" ]; then
+              echo "$CRITICAL_VULNS" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No critical vulnerabilities found!" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Scan for misconfigurations
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-name }}:latest
+          scan-type: 'config'
+          format: 'json'
+          output: 'trivy-config.json'
+        continue-on-error: true
+
+      - name: Check for secrets
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.image-name }}:latest
+          scan-type: 'secret'
+          format: 'json'
+          output: 'trivy-secrets.json'
+        continue-on-error: true
+
+      - name: Analyze configuration issues
+        run: |
+          if [ -f trivy-config.json ]; then
+            CONFIG_ISSUES=$(jq '[.Results[]?.Misconfigurations[]?] | length' trivy-config.json)
+            
+            echo "### Configuration Analysis" >> $GITHUB_STEP_SUMMARY
+            echo "- **Misconfigurations Found:** ${CONFIG_ISSUES:-0}" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${CONFIG_ISSUES:-0}" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "#### Configuration Issues" >> $GITHUB_STEP_SUMMARY
+              jq -r '.Results[]?.Misconfigurations[]? | "- [\(.Severity)] \(.Title): \(.Description)"' trivy-config.json | head -5 >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Check for secrets in image
+        run: |
+          if [ -f trivy-secrets.json ]; then
+            SECRETS=$(jq '[.Results[]?.Secrets[]?] | length' trivy-secrets.json)
+            
+            echo "### Secret Detection" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${SECRETS:-0}" -gt 0 ]; then
+              echo "⚠️ **Warning:** ${SECRETS} potential secrets detected in image" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Review the artifacts for details." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No secrets detected in image" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Generate compliance report
+        run: |
+          cat > security-compliance.md << EOF
+          # Security Compliance Report
+          
+          ## Image: ${{ inputs.image-name }}:latest
+          **Scan Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          
+          ## Vulnerability Summary
+          - Critical: ${{ steps.parse-results.outputs.critical }}
+          - High: ${{ steps.parse-results.outputs.high }}
+          - Medium: ${{ steps.parse-results.outputs.medium }}
+          - Low: ${{ steps.parse-results.outputs.low }}
+          - **Total:** ${{ steps.parse-results.outputs.total }}
+          
+          ## Compliance Status
+          EOF
+          
+          if [ "${{ steps.parse-results.outputs.critical }}" -eq 0 ]; then
+            echo "✅ **PASSED**: No critical vulnerabilities" >> security-compliance.md
+          else
+            echo "❌ **FAILED**: ${{ steps.parse-results.outputs.critical }} critical vulnerabilities found" >> security-compliance.md
+          fi
+
+      - name: Compare with previous scan
+        run: |
+          # This would compare with previous scan results
+          # For now, just document the baseline
+          echo "### Scan Baseline" >> $GITHUB_STEP_SUMMARY
+          echo "This scan establishes the security baseline for commit ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload scan artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-scan-results
+          path: |
+            trivy-results.sarif
+            trivy-results.json
+            trivy-results.txt
+            trivy-config.json
+            trivy-secrets.json
+            security-compliance.md
+          retention-days: 90
+
+      - name: Evaluate scan results
+        id: evaluate
+        run: |
+          CRITICAL=${{ steps.parse-results.outputs.critical }}
+          HIGH=${{ steps.parse-results.outputs.high }}
+          
+          if [ "${{ inputs.fail-on-critical }}" = "true" ] && [ "$CRITICAL" -gt 0 ]; then
+            echo "result=failed" >> $GITHUB_OUTPUT
+            echo "## ❌ Security Scan Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** $CRITICAL critical vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please review the scan results and remediate critical vulnerabilities." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          elif [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "result=warning" >> $GITHUB_OUTPUT
+            echo "## ⚠️ Security Scan Warning" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Vulnerabilities detected but not blocking deployment." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "result=passed" >> $GITHUB_OUTPUT
+            echo "## ✅ Security Scan Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No critical or high severity vulnerabilities detected!" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create security badge
+        run: |
+          CRITICAL=${{ steps.parse-results.outputs.critical }}
+          
+          if [ "$CRITICAL" -eq 0 ]; then
+            BADGE_COLOR="success"
+            BADGE_MESSAGE="secure"
+          else
+            BADGE_COLOR="critical"
+            BADGE_MESSAGE="${CRITICAL} critical"
+          fi
+          
+          echo "Badge: ![Security](https://img.shields.io/badge/security-${BADGE_MESSAGE}-${BADGE_COLOR})" >> $GITHUB_STEP_SUMMARY
+
+      - name: Post summary comment
+        run: |
+          echo "### 🔒 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ inputs.image-name }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scan Type:** Vulnerability + Configuration + Secrets" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ steps.evaluate.outputs.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Issues:** ${{ steps.parse-results.outputs.total }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "For detailed results, check the Security tab and download artifacts." >> $GITHUB_STEP_SUMMARY
