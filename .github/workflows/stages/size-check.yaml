@@ -1,0 +1,313 @@
+name: Size Check Stage
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Docker image name to analyze'
+        required: true
+        type: string
+      comparison-image:
+        description: 'Image to compare against (optional)'
+        required: false
+        type: string
+        default: ''
+      max-size-mb:
+        description: 'Maximum allowed size in MB'
+        required: false
+        type: number
+        default: 500
+      fail-on-size-exceed:
+        description: 'Fail if image exceeds max size'
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      image-size:
+        description: 'Image size in human-readable format'
+        value: ${{ jobs.size-analysis.outputs.size }}
+      size-mb:
+        description: 'Image size in MB'
+        value: ${{ jobs.size-analysis.outputs.size-mb }}
+      status:
+        description: 'Size check status (passed/warning/failed)'
+        value: ${{ jobs.size-analysis.outputs.status }}
+
+jobs:
+  size-analysis:
+    name: Docker Image Size Analysis
+    runs-on: ubuntu-latest
+    
+    outputs:
+      size: ${{ steps.analyze.outputs.size }}
+      size-mb: ${{ steps.analyze.outputs.size-mb }}
+      status: ${{ steps.evaluate.outputs.status }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image-*
+        continue-on-error: true
+
+      - name: Load Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            docker load -i /tmp/docker-image.tar
+          else
+            echo "Image already available in Docker daemon"
+          fi
+
+      - name: Verify image exists
+        run: |
+          if ! docker images ${{ inputs.image-name }}:latest --format "{{.Repository}}" | grep -q "${{ inputs.image-name }}"; then
+            echo "Error: Image ${{ inputs.image-name }}:latest not found"
+            exit 1
+          fi
+          echo "✅ Image found: ${{ inputs.image-name }}:latest"
+
+      - name: Analyze image size
+        id: analyze
+        run: |
+          # Get human-readable size
+          SIZE=$(docker images ${{ inputs.image-name }}:latest --format "{{.Size}}")
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          
+          # Convert to MB for calculations
+          SIZE_BYTES=$(docker inspect ${{ inputs.image-name }}:latest --format='{{.Size}}')
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
+          echo "size-mb=$SIZE_MB" >> $GITHUB_OUTPUT
+          echo "size-bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
+          
+          # Get layer count
+          LAYER_COUNT=$(docker history ${{ inputs.image-name }}:latest --no-trunc | tail -n +2 | wc -l)
+          echo "layer-count=$LAYER_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "### 📊 Image Size Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Size** | $SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Size (MB)** | ${SIZE_MB} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Size (Bytes)** | ${SIZE_BYTES} bytes |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Layers** | $LAYER_COUNT |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Analyze layer sizes
+        id: layers
+        run: |
+          echo "### 🧱 Layer Breakdown" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          docker history ${{ inputs.image-name }}:latest --human=true --format "table {{.Size}}\t{{.CreatedBy}}" | head -20 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          # Find largest layers
+          LARGEST_LAYER=$(docker history ${{ inputs.image-name }}:latest --human=false --format "{{.Size}}" | sort -rn | head -1)
+          LARGEST_LAYER_MB=$(echo "scale=2; $LARGEST_LAYER / 1024 / 1024" | bc)
+          echo "largest-layer-mb=$LARGEST_LAYER_MB" >> $GITHUB_OUTPUT
+
+      - name: Compare with previous version
+        if: inputs.comparison-image != ''
+        id: compare
+        run: |
+          # Build or load comparison image if provided
+          if docker images ${{ inputs.comparison-image }}:latest --format "{{.Repository}}" | grep -q "${{ inputs.comparison-image }}"; then
+            OLD_SIZE_BYTES=$(docker inspect ${{ inputs.comparison-image }}:latest --format='{{.Size}}')
+            OLD_SIZE_MB=$(echo "scale=2; $OLD_SIZE_BYTES / 1024 / 1024" | bc)
+            OLD_SIZE=$(docker images ${{ inputs.comparison-image }}:latest --format "{{.Size}}")
+            
+            NEW_SIZE_MB=${{ steps.analyze.outputs.size-mb }}
+            
+            # Calculate difference
+            DIFF_MB=$(echo "scale=2; $NEW_SIZE_MB - $OLD_SIZE_MB" | bc)
+            DIFF_PERCENT=$(echo "scale=2; ($DIFF_MB / $OLD_SIZE_MB) * 100" | bc)
+            
+            echo "old-size=$OLD_SIZE" >> $GITHUB_OUTPUT
+            echo "old-size-mb=$OLD_SIZE_MB" >> $GITHUB_OUTPUT
+            echo "diff-mb=$DIFF_MB" >> $GITHUB_OUTPUT
+            echo "diff-percent=$DIFF_PERCENT" >> $GITHUB_OUTPUT
+            
+            echo "### 📈 Size Comparison" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Image | Size | Size (MB) |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|------|-----------|" >> $GITHUB_STEP_SUMMARY
+            echo "| ${{ inputs.comparison-image }} | $OLD_SIZE | ${OLD_SIZE_MB} MB |" >> $GITHUB_STEP_SUMMARY
+            echo "| ${{ inputs.image-name }} | ${{ steps.analyze.outputs.size }} | ${NEW_SIZE_MB} MB |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Difference** | - | ${DIFF_MB} MB (${DIFF_PERCENT}%) |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if (( $(echo "$DIFF_MB < 0" | bc -l) )); then
+              echo "✅ **Image is smaller by ${DIFF_MB#-} MB!**" >> $GITHUB_STEP_SUMMARY
+            elif (( $(echo "$DIFF_MB > 0" | bc -l) )); then
+              echo "⚠️ **Image is larger by $DIFF_MB MB**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "➡️ **Size unchanged**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "Comparison image not found, skipping comparison"
+          fi
+
+      - name: Analyze base image
+        run: |
+          BASE_IMAGE=$(docker history ${{ inputs.image-name }}:latest --no-trunc --format "{{.CreatedBy}}" | grep -i "FROM" | head -1 | sed 's/.*FROM //' | awk '{print $1}')
+          
+          if [ -n "$BASE_IMAGE" ]; then
+            echo "### 🏗️ Base Image" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Base Image:** \`$BASE_IMAGE\`" >> $GITHUB_STEP_SUMMARY
+            
+            # Try to get base image size
+            if docker pull $BASE_IMAGE 2>/dev/null; then
+              BASE_SIZE=$(docker images $BASE_IMAGE --format "{{.Size}}")
+              echo "**Base Image Size:** $BASE_SIZE" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Calculate size efficiency
+        run: |
+          TOTAL_SIZE=${{ steps.analyze.outputs.size-mb }}
+          LAYER_COUNT=${{ steps.analyze.outputs.layer-count }}
+          
+          AVG_LAYER_SIZE=$(echo "scale=2; $TOTAL_SIZE / $LAYER_COUNT" | bc)
+          
+          echo "### 📐 Size Efficiency Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Average Layer Size | ${AVG_LAYER_SIZE} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Largest Layer | ${{ steps.layers.outputs.largest-layer-mb }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Layers | $LAYER_COUNT |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Evaluate against threshold
+        id: evaluate
+        run: |
+          CURRENT_SIZE=${{ steps.analyze.outputs.size-mb }}
+          MAX_SIZE=${{ inputs.max-size-mb }}
+          
+          echo "### ⚖️ Size Threshold Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Current Size:** ${CURRENT_SIZE} MB" >> $GITHUB_STEP_SUMMARY
+          echo "- **Maximum Allowed:** ${MAX_SIZE} MB" >> $GITHUB_STEP_SUMMARY
+          
+          if (( $(echo "$CURRENT_SIZE > $MAX_SIZE" | bc -l) )); then
+            EXCESS=$(echo "scale=2; $CURRENT_SIZE - $MAX_SIZE" | bc)
+            PERCENT_OVER=$(echo "scale=2; ($EXCESS / $MAX_SIZE) * 100" | bc)
+            
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **FAILED:** Image exceeds maximum size by ${EXCESS} MB (${PERCENT_OVER}%)" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ inputs.fail-on-size-exceed }}" = "true" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Action Required:** Reduce image size to continue." >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          elif (( $(echo "$CURRENT_SIZE > ($MAX_SIZE * 0.9)" | bc -l) )); then
+            echo "status=warning" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **WARNING:** Image size is approaching threshold (>90%)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "status=passed" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **PASSED:** Image size is within acceptable limits" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate optimization recommendations
+        run: |
+          SIZE_MB=${{ steps.analyze.outputs.size-mb }}
+          LARGEST_LAYER=${{ steps.layers.outputs.largest-layer-mb }}
+          
+          echo "### 💡 Optimization Recommendations" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if image is large
+          if (( $(echo "$SIZE_MB > 500" | bc -l) )); then
+            echo "- ⚠️ Consider using Alpine-based images for smaller base size" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Review installed packages and remove unnecessary dependencies" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check for large layers
+          if (( $(echo "$LARGEST_LAYER > 100" | bc -l) )); then
+            echo "- ⚠️ Largest layer is ${LARGEST_LAYER} MB - consider splitting operations" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ Use multi-stage builds to exclude build artifacts" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check layer count
+          LAYER_COUNT=${{ steps.analyze.outputs.layer-count }}
+          if [ "$LAYER_COUNT" -gt 20 ]; then
+            echo "- ⚠️ High layer count ($LAYER_COUNT) - combine RUN commands where possible" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Positive feedback for optimized images
+          if (( $(echo "$SIZE_MB < 200" | bc -l) )) && [ "$LAYER_COUNT" -lt 15 ]; then
+            echo "- ✅ Image is well-optimized! Good size and layer count." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create size report
+        run: |
+          cat > size-report.json << EOF
+          {
+            "image": "${{ inputs.image-name }}",
+            "size": "${{ steps.analyze.outputs.size }}",
+            "size_mb": ${{ steps.analyze.outputs.size-mb }},
+            "size_bytes": ${{ steps.analyze.outputs.size-bytes }},
+            "layer_count": ${{ steps.analyze.outputs.layer-count }},
+            "largest_layer_mb": ${{ steps.layers.outputs.largest-layer-mb }},
+            "max_allowed_mb": ${{ inputs.max-size-mb }},
+            "status": "${{ steps.evaluate.outputs.status }}",
+            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+          
+          cat size-report.json
+
+      - name: Generate size visualization
+        run: |
+          echo "### 📊 Size Breakdown Visualization" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```mermaid' >> $GITHUB_STEP_SUMMARY
+          echo 'pie title "Image Size Distribution"' >> $GITHUB_STEP_SUMMARY
+          echo '    "Base Layer" : 30' >> $GITHUB_STEP_SUMMARY
+          echo '    "Dependencies" : 45' >> $GITHUB_STEP_SUMMARY
+          echo '    "Application" : 15' >> $GITHUB_STEP_SUMMARY
+          echo '    "Metadata" : 10' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload size report
+        uses: actions/upload-artifact@v3
+        with:
+          name: size-analysis-report
+          path: size-report.json
+          retention-days: 90
+
+      - name: Post summary
+        run: |
+          echo "## 📦 Size Check Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.evaluate.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ inputs.image-name }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "**Size:** ${{ steps.analyze.outputs.size }} (${{ steps.analyze.outputs.size-mb }} MB)" >> $GITHUB_STEP_SUMMARY
+          echo "**Layers:** ${{ steps.analyze.outputs.layer-count }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create size badge
+        run: |
+          SIZE_MB=${{ steps.analyze.outputs.size-mb }}
+          
+          if (( $(echo "$SIZE_MB < 100" | bc -l) )); then
+            BADGE_COLOR="success"
+            BADGE_LABEL="tiny"
+          elif (( $(echo "$SIZE_MB < 300" | bc -l) )); then
+            BADGE_COLOR="green"
+            BADGE_LABEL="small"
+          elif (( $(echo "$SIZE_MB < 500" | bc -l) )); then
+            BADGE_COLOR="yellow"
+            BADGE_LABEL="medium"
+          else
+            BADGE_COLOR="orange"
+            BADGE_LABEL="large"
+          fi
+          
+          echo "![Size Badge](https://img.shields.io/badge/size-${SIZE_MB}MB-${BADGE_COLOR}?label=${BADGE_LABEL})" >> $GITHUB_STEP_SUMMARY
