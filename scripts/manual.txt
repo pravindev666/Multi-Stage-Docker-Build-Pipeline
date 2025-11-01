@@ -211,3 +211,47 @@ Generate reports for documentation
 CI/CD validation to ensure size targets
 
 This script provides a comprehensive, production-ready comparison tool with professional output and detailed analysis!RetryClaude can make mistakes. Please double-check responses. Sonnet 4.5
+
+
+A comprehensive Docker image analysis tool that identifies optimization opportunities, calculates an optimization score, and provides actionable recommendations.
+Key Features
+1. Layer Analysis
+
+Lists all layers with sizes
+Identifies large layers (configurable threshold)
+Shows commands that created each layer
+Color-codes warnings for large layers
+
+2. Optimization Recommendations
+
+Image size analysis
+Layer count optimization
+Multi-stage build detection
+Package manager cleanup checks
+pip cache optimization
+Security best practices (non-root user, health checks)
+
+3. Optimization Score (0-100)
+Calculates based on:
+
+Image size penalties
+Layer count penalties
+Multi-stage build bonus
+Security configurations
+
+4. Best Practices Template
+
+Complete Dockerfile example
+10 key optimization techniques
+Ready-to-use multi-stage template
+
+Usage Examples
+Basic Analysis:
+bashchmod +x scripts/optimize-image.sh
+./scripts/optimize-image.sh
+Analyze Specific Image:
+bash./scripts/optimize-image.sh myapp:v1.0
+Custom Threshold:
+bash./scripts/optimize-image.sh multi-stage-app:latest --threshold 100
+Generate Report:
+bash./scripts/optimize-image.sh --output optimization-report.txt
