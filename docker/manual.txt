@@ -1,0 +1,102 @@
+Services Breakdown:
+1. multi-stage-app (Primary Service)
+
+Port: 5000
+Build: Uses Dockerfile.multi-stage
+Build Args: BUILD_DATE, GIT_COMMIT, APP_VERSION
+Health Check: Python-based health endpoint check
+Auto-restart: Unless manually stopped
+Size: ~145MB
+
+2. single-stage-app (Comparison Service)
+
+Port: 5001
+Build: Uses Dockerfile.single-stage
+Purpose: Size comparison demonstration
+Size: ~1.2GB (shows 88% increase)
+
+3. nginx (Reverse Proxy)
+
+Port: 80
+Image: nginx:alpine (~5MB)
+Config: Custom nginx.conf for routing
+Depends On: Waits for multi-stage-app to be healthy
+
+4. prometheus (Monitoring - Optional)
+
+Port: 9090
+Profile: monitoring
+Storage: Persistent volume
+Purpose: Metrics collection
+
+5. grafana (Visualization - Optional)
+
+Port: 3000
+Profile: monitoring
+Default Login: admin/admin
+Purpose: Dashboard visualization
+
+Usage Commands:
+Start All Services (Apps + Nginx):
+bashcd docker
+docker-compose up -d
+Start with Monitoring:
+bashdocker-compose --profile monitoring up -d
+Build Only:
+bashdocker-compose build
+View Logs:
+bash# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f multi-stage-app
+Compare Image Sizes:
+bashdocker-compose build
+docker images | grep stage-app
+
+# Output:
+# multi-stage-app   latest   abc123   2 mins ago   145MB
+# single-stage-app  latest   def456   5 mins ago   1.2GB
+Stop Services:
+bashdocker-compose down
+Stop and Remove Volumes:
+bashdocker-compose down -v
+Access URLs:
+ServiceURLDescriptionMulti-stage Apphttp://localhost:5000Optimized appSingle-stage Apphttp://localhost:5001Comparison appNginx Proxyhttp://localhostLoad balancerPrometheushttp://localhost:9090Metrics (with monitoring profile)Grafanahttp://localhost:3000Dashboards (with monitoring profile)
+Environment Variables:
+Set these before running docker-compose:
+bashexport BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+export GIT_COMMIT=$(git rev-parse --short HEAD)
+export APP_VERSION="1.0.0"
+
+docker-compose up -d
+Key Features:
+✅ Health Checks - Automatic health monitoring
+✅ Service Dependencies - Nginx waits for app health
+✅ Persistent Volumes - Data survives container restarts
+✅ Custom Networks - Isolated bridge network
+✅ Profiles - Optional monitoring stack
+✅ Labels - Container metadata for organization
+✅ Auto-restart - Services restart on failure
+✅ Build Cache - Faster rebuilds
+Testing the Setup:
+# 1. Start services
+docker-compose up -d
+
+# 2. Wait for health check
+docker-compose ps
+
+# 3. Test multi-stage app
+curl http://localhost:5000
+curl http://localhost:5000/health
+curl http://localhost:5000/info
+
+# 4. Test single-stage app
+curl http://localhost:5001
+curl http://localhost:5001/health
+
+# 5. Test via nginx
+curl http://localhost
+
+# 6. Compare sizes
+docker images | grep stage-app
