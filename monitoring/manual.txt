@@ -1,0 +1,148 @@
+Perfect! Here's the complete monitoring/size-tracker.py code!
+What This Script Does
+This Python script tracks Docker image sizes over time, comparing multi-stage vs single-stage builds and generating detailed reports.
+Key Features
+1. Size Tracking
+
+Retrieves exact image sizes in bytes
+Converts to human-readable format (MB, GB)
+Calculates size reduction percentage
+Stores historical data in JSON
+
+2. Comparison Analysis
+
+Compares multi-stage vs single-stage images
+Calculates absolute and percentage reduction
+Tracks changes over time
+
+3. Trend Reporting
+
+Shows historical trends
+Calculates averages across all builds
+Displays last 5 builds
+Export to CSV for spreadsheet analysis
+
+4. Data Persistence
+
+Saves history to size-history.json
+Appends new entries without losing history
+Can export to CSV format
+
+Usage Examples
+Track Current Images:
+bashcd monitoring
+
+# Basic tracking
+python size-tracker.py
+
+# With custom images
+python size-tracker.py \
+  --multi-stage multi-stage-app:latest \
+  --single-stage single-stage-app:latest
+
+# With git commit
+python size-tracker.py --commit $(git rev-parse --short HEAD)
+```
+
+**Output:**
+```
+============================================================
+Docker Image Size Comparison
+============================================================
+Timestamp: 2024-11-01T10:30:00.123456
+Commit: abc123
+
+Multi-Stage Image:          145.23 MB
+Single-Stage Image:        1234.56 MB
+------------------------------------------------------------
+Size Reduction:            1089.33 MB (88.24%)
+============================================================
+Generate Trend Report:
+bashpython size-tracker.py --report
+```
+
+**Output:**
+```
+================================================================================
+Size Trend Report
+================================================================================
+Total Builds Tracked: 10
+
+Average Multi-Stage Size:  145.67 MB
+Average Single-Stage Size: 1235.23 MB
+Average Reduction:         88.21%
+
+Recent History (Last 5 Builds):
+--------------------------------------------------------------------------------
+Date                 Commit       Multi-Stage     Single-Stage    Reduction  
+--------------------------------------------------------------------------------
+2024-11-01T10:00:00  abc123       145.23 MB       1234.56 MB      88.24%     
+2024-11-01T09:30:00  def456       146.12 MB       1235.67 MB      88.17%     
+2024-11-01T09:00:00  ghi789       144.89 MB       1233.45 MB      88.25%     
+================================================================================
+Export to CSV:
+bashpython size-tracker.py --export-csv
+Creates size-history.csv:
+csvtimestamp,commit,multi_stage_bytes,multi_stage_human,single_stage_bytes,single_stage_human,reduction_bytes,reduction_percent
+2024-11-01T10:30:00,abc123,152346789,145.23 MB,1294567890,1234.56 MB,1142221101,88.24
+Command Line Options
+OptionDescriptionDefault--multi-stageMulti-stage image namemulti-stage-app:latest--single-stageSingle-stage image namesingle-stage-app:latest--commitGit commit SHAunknown--reportGenerate trend reportFalse--export-csvExport to CSVFalse--data-filePath to data filesize-history.json
+Integration with CI/CD
+In GitHub Actions:
+yaml- name: Track image sizes
+  run: |
+    python monitoring/size-tracker.py \
+      --multi-stage multi-stage-app:latest \
+      --single-stage single-stage-app:latest \
+      --commit ${{ github.sha }}
+
+- name: Generate report
+  run: python monitoring/size-tracker.py --report
+
+- name: Upload history
+  uses: actions/upload-artifact@v3
+  with:
+    name: size-history
+    path: size-history.json
+Data Structure
+size-history.json format:
+json{
+  "entries": [
+    {
+      "timestamp": "2024-11-01T10:30:00.123456",
+      "commit": "abc123",
+      "multi_stage": {
+        "image": "multi-stage-app:latest",
+        "size_bytes": 152346789,
+        "size_human": "145.23 MB"
+      },
+      "single_stage": {
+        "image": "single-stage-app:latest",
+        "size_bytes": 1294567890,
+        "size_human": "1234.56 MB"
+      },
+      "reduction": {
+        "bytes": 1142221101,
+        "human": "1089.33 MB",
+        "percent": 88.24
+      }
+    }
+  ]
+}
+Requirements
+bash# No external dependencies!
+# Uses only Python standard library:
+# - json
+# - subprocess
+# - datetime
+# - pathlib
+# - argparse
+Use Cases
+
+Track optimization progress over multiple builds
+Prove ROI of multi-stage builds with hard data
+Detect size regressions when images grow unexpectedly
+Generate reports for management/stakeholders
+Export data for analysis in Excel/Google Sheets
+
+This script provides comprehensive size tracking and analysis for your Docker optimization journey!Retry
