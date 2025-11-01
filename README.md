@@ -1139,30 +1139,12 @@ ls -la scripts/
    - Automated sync from Git
    - Rollback capabilities
 
-### Learning Resources
-
-- Docker Multi-Stage Builds: https://docs.docker.com/build/building/multi-stage/
-- GitHub Actions: https://docs.github.com/en/actions
-- AWS ECR: https://docs.aws.amazon.com/ecr/
-- Trivy Security Scanner: https://aquasecurity.github.io/trivy/
-- Container Best Practices: https://docs.docker.com/develop/dev-best-practices/
-
-## License
-
-This project is provided as-is for educational and demonstration purposes.
 
 ## Contributing
 
-This is a demonstration project. For production use:
+For production use:
 1. Fork the repository
 2. Customize for your specific needs
 3. Update security configurations
 4. Modify AWS settings for your account
 
-## Support
-
-For issues or questions:
-- Review the Troubleshooting section
-- Check GitHub Actions logs
-- Consult Docker documentation
-- Review AWS CloudWatch logs
