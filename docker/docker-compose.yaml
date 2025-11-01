@@ -1,1 +1,145 @@
+version: '3.8'
 
+services:
+  # Multi-stage optimized application
+  multi-stage-app:
+    build:
+      context: ../app
+      dockerfile: Dockerfile.multi-stage
+      args:
+        BUILD_DATE: ${BUILD_DATE:-2024-01-01}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        APP_VERSION: ${APP_VERSION:-1.0.0}
+      cache_from:
+        - multi-stage-app:latest
+    image: multi-stage-app:latest
+    container_name: multi-stage-app
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - APP_VERSION=${APP_VERSION:-1.0.0}
+      - BUILD_DATE=${BUILD_DATE:-unknown}
+      - GIT_COMMIT=${GIT_COMMIT:-unknown}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app-network
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "app.name=multi-stage-app"
+      - "app.version=${APP_VERSION:-1.0.0}"
+      - "app.description=Optimized multi-stage Docker build"
+
+  # Single-stage application (for comparison)
+  single-stage-app:
+    build:
+      context: ../app
+      dockerfile: Dockerfile.single-stage
+    image: single-stage-app:latest
+    container_name: single-stage-app
+    ports:
+      - "5001:5000"
+    environment:
+      - PORT=5000
+    restart: unless-stopped
+    networks:
+      - app-network
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "app.name=single-stage-app"
+      - "app.description=Traditional single-stage Docker build"
+
+  # Nginx reverse proxy (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      multi-stage-app:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "app.name=nginx-proxy"
+      - "app.description=Reverse proxy for load balancing"
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - app-network
+    profiles:
+      - monitoring
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "app.name=prometheus"
+      - "app.description=Metrics collection and monitoring"
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - app-network
+    profiles:
+      - monitoring
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "app.name=grafana"
+      - "app.description=Metrics visualization dashboard"
+
+networks:
+  app-network:
+    driver: bridge
+    name: multi-stage-network
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "network.description=Isolated network for multi-stage pipeline services"
+
+volumes:
+  prometheus-data:
+    name: prometheus-data
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "volume.description=Persistent storage for Prometheus metrics"
+  grafana-data:
+    name: grafana-data
+    labels:
+      - "com.docker.compose.project=multi-stage-pipeline"
+      - "volume.description=Persistent storage for Grafana dashboards"
