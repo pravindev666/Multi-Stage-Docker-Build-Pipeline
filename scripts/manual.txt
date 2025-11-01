@@ -255,3 +255,57 @@ Custom Threshold:
 bash./scripts/optimize-image.sh multi-stage-app:latest --threshold 100
 Generate Report:
 bash./scripts/optimize-image.sh --output optimization-report.txt
+
+
+A comprehensive security scanning tool that uses Trivy to scan Docker images for vulnerabilities, misconfigurations, and exposed secrets with detailed reporting.
+Key Features
+1. Multi-Level Vulnerability Scanning
+
+OS package vulnerabilities
+Application dependency vulnerabilities
+Security misconfigurations
+Exposed secrets detection
+
+2. Detailed Reporting
+
+Color-coded severity levels
+Top vulnerabilities display
+Security score (0-100)
+Remediation guidance
+
+3. Multiple Export Formats
+
+JSON (machine-readable)
+HTML (browser-viewable)
+SARIF (GitHub Security integration)
+CSV (spreadsheet import)
+
+4. Image Comparison
+
+Compare vulnerability counts
+Multi-stage vs single-stage
+Before/after optimization
+
+5. CI/CD Integration
+
+--fail-on-critical flag
+Exit codes for automation
+SARIF output for GitHub
+
+Usage Examples
+Basic Scan:
+bashchmod +x scripts/scan-vulnerabilities.sh
+./scripts/scan-vulnerabilities.sh
+Complete Security Audit:
+bash./scripts/scan-vulnerabilities.sh \
+  --scan-config \
+  --scan-secrets \
+  --output security-report
+Compare Images:
+bash./scripts/scan-vulnerabilities.sh multi-stage-app:latest \
+  --compare single-stage-app:latest
+CI/CD Integration:
+bash./scripts/scan-vulnerabilities.sh \
+  --severity CRITICAL,HIGH \
+  --fail-on-critical \
+  --output pipeline-scan
