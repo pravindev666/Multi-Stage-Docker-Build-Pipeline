@@ -146,3 +146,228 @@ Generate reports for management/stakeholders
 Export data for analysis in Excel/Google Sheets
 
 This script provides comprehensive size tracking and analysis for your Docker optimization journey!Retry
+
+
+
+
+
+
+
+
+
+What This Script Does
+This Python script tracks Docker build times, cache efficiency, and performance metrics over time, providing detailed analysis of build performance.
+Key Features
+1. Build Time Tracking
+
+Measures exact build duration
+Tracks cache hit rates
+Records build steps
+Stores historical data
+
+2. Cache Analysis
+
+Counts CACHED layers
+Calculates cache hit percentage
+Compares cached vs non-cached builds
+
+3. Performance Comparison
+
+Multi-stage vs single-stage builds
+With-cache vs no-cache builds
+Duration and size metrics
+
+4. Comprehensive Reporting
+
+Performance trends over time
+Average build times
+Cache efficiency statistics
+Export to CSV
+
+Usage Examples
+Track a Build:
+bashcd monitoring
+
+# Track multi-stage build
+python track-build-time.py \
+  --dockerfile ../app/Dockerfile.multi-stage \
+  --context ../app \
+  --image multi-stage-app:latest \
+  --type multi-stage \
+  --commit $(git rev-parse --short HEAD)
+```
+
+**Output:**
+```
+Building image: multi-stage-app:latest
+Dockerfile: ../app/Dockerfile.multi-stage
+Context: ../app
+No cache: False
+------------------------------------------------------------
+✓ Build completed in 3m 45s
+  Cache hits: 12/15 (80.0%)
+
+======================================================================
+Build Summary
+======================================================================
+Timestamp:       2024-11-01T10:30:00.123456
+Commit:          abc123
+Build Type:      multi-stage
+Image:           multi-stage-app:latest
+
+Duration:        3m 45s
+Image Size:      145.23 MB
+Cache Hits:      12/15 (80.0%)
+No Cache Build:  No
+======================================================================
+Track No-Cache Build:
+bashpython track-build-time.py \
+  --dockerfile ../app/Dockerfile.multi-stage \
+  --context ../app \
+  --image multi-stage-app:latest \
+  --no-cache
+Track Single-Stage Build:
+bashpython track-build-time.py \
+  --dockerfile ../app/Dockerfile.single-stage \
+  --context ../app \
+  --image single-stage-app:latest \
+  --type single-stage
+Generate Performance Report:
+bashpython track-build-time.py --report
+```
+
+**Output:**
+```
+================================================================================
+Build Performance Report
+================================================================================
+Total Builds Tracked: 15
+
+Multi-Stage Builds:
+--------------------------------------------------------------------------------
+  Total builds:           10
+  Average duration:       3m 42s
+  Average cache hit rate: 78.5%
+  With cache:             3m 15s
+  Without cache:          5m 30s
+
+Single-Stage Builds:
+--------------------------------------------------------------------------------
+  Total builds:           5
+  Average duration:       8m 15s
+
+Build Time Comparison:
+--------------------------------------------------------------------------------
+  Multi-stage is 55.1% faster
+  Average time saved: 4m 33s
+
+Recent Builds (Last 5):
+--------------------------------------------------------------------------------
+Date                 Type            Duration     Cache      Size        
+--------------------------------------------------------------------------------
+2024-11-01T10:30:00  multi-stage     3m 45s       80.0%      145.23 MB   
+2024-11-01T09:45:00  multi-stage     3m 12s       85.7%      145.12 MB   
+2024-11-01T09:00:00  single-stage    8m 30s       N/A        1234.56 MB  
+================================================================================
+Compare Multi-Stage vs Single-Stage:
+bashpython track-build-time.py --compare
+```
+
+**Output:**
+```
+======================================================================
+Multi-Stage vs Single-Stage Comparison
+======================================================================
+
+Build Duration:
+  Multi-Stage:  3m 42s
+  Single-Stage: 8m 15s
+  Improvement:  55.1% faster
+
+Image Size:
+  Multi-Stage:  145.23 MB
+  Single-Stage: 1234.56 MB
+  Reduction:    88.2% smaller
+======================================================================
+Export to CSV:
+bashpython track-build-time.py --export-csv
+Creates build-history.csv:
+csvtimestamp,commit,build_type,image_name,duration_seconds,cache_hits,total_steps,cache_hit_rate,image_size_bytes,no_cache
+2024-11-01T10:30:00,abc123,multi-stage,multi-stage-app:latest,225.45,12,15,80.0,152346789,False
+2024-11-01T09:45:00,def456,multi-stage,multi-stage-app:latest,192.15,12,14,85.7,152123456,False
+Command Line Options
+OptionDescriptionDefault--dockerfilePath to Dockerfileapp/Dockerfile.multi-stage--contextBuild context pathapp--imageImage name and tagmulti-stage-app:latest--typeBuild type (multi-stage/single-stage)multi-stage--commitGit commit SHAunknown--no-cacheBuild without cacheFalse--reportGenerate performance reportFalse--compareCompare build typesFalse--export-csvExport to CSVFalse--data-filePath to data filebuild-history.json
+Integration with CI/CD
+In GitHub Actions:
+yaml- name: Track multi-stage build time
+  run: |
+    python monitoring/track-build-time.py \
+      --dockerfile app/Dockerfile.multi-stage \
+      --context app \
+      --image multi-stage-app:latest \
+      --type multi-stage \
+      --commit ${{ github.sha }}
+
+- name: Track single-stage build time
+  run: |
+    python monitoring/track-build-time.py \
+      --dockerfile app/Dockerfile.single-stage \
+      --context app \
+      --image single-stage-app:latest \
+      --type single-stage \
+      --commit ${{ github.sha }}
+
+- name: Generate comparison report
+  run: python monitoring/track-build-time.py --compare
+
+- name: Upload build history
+  uses: actions/upload-artifact@v3
+  with:
+    name: build-history
+    path: build-history.json
+Data Structure
+build-history.json format:
+json{
+  "builds": [
+    {
+      "timestamp": "2024-11-01T10:30:00.123456",
+      "commit": "abc123",
+      "build_type": "multi-stage",
+      "image_name": "multi-stage-app:latest",
+      "dockerfile": "app/Dockerfile.multi-stage",
+      "no_cache": false,
+      "duration_seconds": 225.45,
+      "duration_human": "3m 45s",
+      "cache_hits": 12,
+      "total_steps": 15,
+      "cache_hit_rate": 80.0,
+      "image_size_bytes": 152346789,
+      "image_size_human": "145.23 MB"
+    }
+  ]
+}
+Requirements
+bash# No external dependencies!
+# Uses only Python standard library:
+# - json
+# - subprocess
+# - time
+# - datetime
+# - pathlib
+# - argparse
+Use Cases
+
+Monitor build performance across commits
+Identify cache inefficiencies - low cache hit rates
+Compare optimization strategies - multi-stage vs single-stage
+Detect build regressions - sudden slowdowns
+Justify optimization work with hard metrics
+Optimize CI/CD pipelines based on data
+
+Key Insights Tracked
+
+⏱️ Build Duration - How long builds take
+💾 Cache Efficiency - % of layers cached
+📦 Image Size - Final image size after build
+🔄 Build Type - Multi-stage vs single-stage
+📊 Trends - Performance over time
