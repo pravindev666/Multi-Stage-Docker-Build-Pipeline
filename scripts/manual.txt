@@ -1,0 +1,213 @@
+A comprehensive bash script that compares Docker image sizes between multi-stage and single-stage builds with detailed analysis, visual comparisons, and cost calculations.
+Key Features
+1. Detailed Size Comparison
+
+Byte-level accuracy
+Human-readable format
+Layer count analysis
+Creation date tracking
+
+2. Visual Representation
+
+ASCII bar chart comparison
+Color-coded output
+Percentage reduction display
+
+3. Cost Calculations
+
+Monthly data transfer estimates
+AWS bandwidth cost projections
+Annual savings calculations
+
+4. Layer Analysis
+
+Layer-by-layer breakdown
+Size per layer
+Command that created each layer
+
+5. Report Generation
+
+Text file output
+Complete layer history
+Detailed metrics
+
+Usage Examples
+Basic Comparison:
+bashcd scripts
+chmod +x compare-sizes.sh
+./compare-sizes.sh
+```
+
+**Output:**
+```
+╔══════════════════════════════════════════╗
+║  Docker Image Size Comparison Tool      ║
+╚══════════════════════════════════════════╝
+
+==========================================
+Docker Image Size Comparison
+==========================================
+
+Checking for images...
+✓ Both images found
+Gathering image information...
+
+==========================================
+Size Comparison Summary
+==========================================
+
+METRIC                    MULTI-STAGE          SINGLE-STAGE        
+-------------------------------------------------------------------
+Image Name                multi-stage-app:latest single-stage-app:latest
+Size (Human)              145MB                1.2GB               
+Size (Bytes)              152346789            1294567890          
+Layer Count               8                    12                  
+Created                   2024-11-01           2024-11-01          
+
+==========================================
+Optimization Results
+==========================================
+
+Size Reduction:
+  Absolute: 1.09 GB
+  Percentage: 88.24%
+
+Layer Optimization:
+  Reduced by: 4 layers
+
+==========================================
+Visual Size Comparison
+==========================================
+
+Multi-Stage:  ████████████ 145MB
+Single-Stage: ██████████████████████████████████████████████████ 1.2GB
+
+==========================================
+Storage & Transfer Savings
+==========================================
+
+Assuming 100 deployments/month:
+
+METRIC                         SINGLE-STAGE    MULTI-STAGE    
+-------------------------------------------------------------------
+Data Transferred               120.34 GB       14.18 GB       
+Transfer Cost (AWS)            $10.83          $1.28          
+
+Monthly Savings: 106.16 GB ($9.55)
+Annual Savings: 1273.92 GB ($114.60)
+With Layer Analysis:
+bash./compare-sizes.sh --layers
+```
+
+**Additional Output:**
+```
+==========================================
+Layer-by-Layer Analysis
+==========================================
+
+Analyzing layers for: MULTI-STAGE
+
+SIZE            LAYER                                             
+-------------------------------------------------------------------
+5.6MB           /bin/sh -c #(nop)  CMD ["gunicorn" "--bind" ...
+0B              /bin/sh -c #(nop)  HEALTHCHECK &{["CMD" "pyth...
+0B              /bin/sh -c #(nop)  EXPOSE 5000
+0B              /bin/sh -c chown -R appuser:appuser /app
+1.2kB           /bin/sh -c #(nop) COPY file:abc123 in /app
+45.3MB          /bin/sh -c #(nop) COPY dir:def456 in /usr/lo...
+0B              /bin/sh -c #(nop) WORKDIR /app
+2.1MB           /bin/sh -c addgroup -g 1000 appuser && addus...
+
+Analyzing layers for: SINGLE-STAGE
+
+SIZE            LAYER                                             
+-------------------------------------------------------------------
+8.9MB           /bin/sh -c #(nop)  CMD ["gunicorn" "--bind" ...
+0B              /bin/sh -c #(nop)  EXPOSE 5000
+1.2kB           /bin/sh -c #(nop) COPY file:abc123 in /app
+67.8MB          /bin/sh -c pip install --no-cache-dir -r req...
+0B              /bin/sh -c #(nop) COPY file:def456 in /app/r...
+234.5MB         /bin/sh -c apt-get update && apt-get install...
+0B              /bin/sh -c #(nop) WORKDIR /app
+... (4 more layers)
+Generate Report:
+bash./compare-sizes.sh --report size-comparison.txt
+Creates a detailed text file with:
+
+Complete comparison metrics
+Full layer history for both images
+Timestamp and metadata
+
+Custom Image Names:
+bash./compare-sizes.sh \
+  --multi-stage myapp:optimized \
+  --single-stage myapp:standard
+Environment Variables:
+bashexport MULTI_STAGE_IMAGE="myapp:v2"
+export SINGLE_STAGE_IMAGE="myapp:v1"
+./compare-sizes.sh
+Command Line Options
+OptionDescription-m, --multi-stage IMAGESpecify multi-stage image name-s, --single-stage IMAGESpecify single-stage image name-l, --layersShow detailed layer analysis-r, --report FILEGenerate detailed report to file-h, --helpShow help message
+Features Breakdown
+1. Color-Coded Output
+
+🔵 Blue: Information
+🟢 Green: Success/Savings
+🟡 Yellow: Warnings/Tips
+🔴 Red: Errors
+🔷 Cyan: Headers
+
+2. Size Calculations
+
+Exact byte measurements
+Human-readable conversions (KB, MB, GB)
+Percentage reductions
+
+3. Cost Analysis
+Calculates based on:
+
+100 deployments/month (configurable in script)
+$0.09/GB AWS data transfer cost
+Monthly and annual projections
+
+4. Error Handling
+
+Checks if images exist
+Validates Docker availability
+Graceful error messages
+Exit codes for automation
+
+Make It Executable:
+bashchmod +x scripts/compare-sizes.sh
+Integration with CI/CD
+In GitHub Actions:
+yaml- name: Compare image sizes
+  run: |
+    chmod +x scripts/compare-sizes.sh
+    ./scripts/compare-sizes.sh --layers --report comparison.txt
+
+- name: Upload comparison report
+  uses: actions/upload-artifact@v3
+  with:
+    name: size-comparison
+    path: comparison.txt
+Requirements
+System Dependencies:
+
+bash (version 4+)
+docker
+bc (for calculations)
+Standard Unix tools (grep, sed, awk)
+
+Check availability:
+bashwhich bash docker bc
+Use Cases
+
+Quick comparison after building both images
+Verify optimization effectiveness
+Calculate cost savings for business case
+Layer analysis to find optimization opportunities
+Generate reports for documentation
+CI/CD validation to ensure size targets
+
+This script provides a comprehensive, production-ready comparison tool with professional output and detailed analysis!RetryClaude can make mistakes. Please double-check responses. Sonnet 4.5
